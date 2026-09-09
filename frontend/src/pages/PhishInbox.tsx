@@ -274,7 +274,7 @@ export default function PhishInboxPage() {
             <TabsTrigger value="seed">Seed</TabsTrigger>
           </TabsList>
         </Tabs>
-        <Tabs value={readFilter} onValueChange={v => setReadFilter(v as any)}>
+        <Tabs value={readFilter} onValueChange={(v: string) => setReadFilter(v as 'all' | 'unread' | 'read')}>
           <TabsList>
             <TabsTrigger value="all">All</TabsTrigger>
             <TabsTrigger value="unread">Unread</TabsTrigger>
