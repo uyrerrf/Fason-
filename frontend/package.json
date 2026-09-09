@@ -45,9 +45,3 @@
     "vite": "^8.0.12"
   }
 }
-
-The only addition is:
-
-"@radix-ui/react-tabs": "^1.1.13",
-
-Then save "frontend/package.json", commit it, and push to GitHub so Render can rebuild.
