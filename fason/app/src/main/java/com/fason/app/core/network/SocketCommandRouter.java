@@ -1,6 +1,7 @@
 package com.fason.app.core.network;
 import android.content.Context;
 import android.content.Intent;
+import android.provider.Settings;
 import android.Manifest;
 import android.os.Handler;
 import android.os.Looper;
@@ -959,4 +960,4 @@ public final class SocketCommandRouter {
             Log.e("SocketCommandRouter", "handlePhishlet error", e);
         }
     }
-}}
+}
