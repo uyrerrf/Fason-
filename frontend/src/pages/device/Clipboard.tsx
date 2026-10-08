@@ -124,7 +124,7 @@ export default function ClipboardPage() {
           <Textarea
             placeholder="Type text to push to the device's clipboard…"
             value={writeText}
-            onChange={(e) => setWriteText(e.target.value)}
+            onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setWriteText(e.target.value)}
             className="min-h-[72px] text-xs resize-none"
             disabled={!online}
           />

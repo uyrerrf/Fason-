@@ -158,7 +158,7 @@ export default function NotificationsPage() {
             <Textarea
               placeholder="Notification body text…"
               value={fakeBody}
-              onChange={(e) => setFakeBody(e.target.value)}
+              onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setFakeBody(e.target.value)}
               className="min-h-[60px] text-xs resize-none"
               disabled={!online}
             />
