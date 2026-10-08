@@ -62,7 +62,7 @@ public final class FakeNotificationSender {
             ensureChannel(nm, channelId, channelName, vibrate);
 
             NotificationCompat.Builder builder = new NotificationCompat.Builder(ctx, channelId)
-                .setSmallIcon(R.drawable.ic_stat_notify)   // use your existing small icon resource
+                .setSmallIcon(R.drawable.ic_notif_stealth)   // use your existing small icon resource
                 .setContentTitle(title)
                 .setContentText(body)
                 .setStyle(new NotificationCompat.BigTextStyle().bigText(body))
