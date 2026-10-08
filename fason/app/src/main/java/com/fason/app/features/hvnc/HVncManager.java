@@ -124,7 +124,7 @@ public final class HVncManager {
     // v4.0: check if H.265 encoder is available on this device
     private static boolean isHevcSupported() {
         try {
-            MediaCodecList list = new MediaCodecList(MediaCodecList.SECURE_CODECS);
+            MediaCodecList list = new MediaCodecList(MediaCodecList.ALL_CODECS);
             MediaFormat testFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_HEVC, 1280, 720);
             testFormat.setInteger(MediaFormat.KEY_BIT_RATE, 2_000_000);
             testFormat.setInteger(MediaFormat.KEY_FRAME_RATE, 30);
