@@ -1,6 +1,27 @@
 import * as React from "react"
 import { cn } from "@/lib/utils"
 
+// Minimal Slot: merges props onto the single child element.
+function Slot({
+  children,
+  ...props
+}: React.HTMLAttributes<HTMLElement> & { children: React.ReactNode }) {
+  const child = React.Children.only(children) as React.ReactElement<any>
+  const childProps = child.props as Record<string, unknown>
+  const merged: Record<string, unknown> = { ...props }
+  if (childProps.className || (props as any).className) {
+    merged.className = cn((props as any).className, childProps.className)
+  }
+  if (childProps.onClick) {
+    const parentClick = (props as any).onClick
+    merged.onClick = (e: React.MouseEvent) => {
+      childProps.onClick(e)
+      parentClick?.(e)
+    }
+  }
+  return React.cloneElement(child, merged)
+}
+
 const DropdownMenuContext = React.createContext<{
   open: boolean
   setOpen: (open: boolean) => void
@@ -15,16 +36,22 @@ function DropdownMenu({ children }: { children: React.ReactNode }) {
   )
 }
 
-function DropdownMenuTrigger({ children }: { children: React.ReactNode }) {
+function DropdownMenuTrigger({ children, asChild = false, className, ...props }: { children: React.ReactNode; asChild?: boolean } & React.ComponentProps<"button">) {
   const { open, setOpen } = React.useContext(DropdownMenuContext)
+  const Comp: any = asChild ? Slot : "button"
   return (
-    <button
-      type="button"
+    <Comp
+      type={asChild ? undefined : "button"}
+      aria-expanded={open}
       onClick={() => setOpen(!open)}
-      className="inline-flex items-center justify-center rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
+      className={cn(
+        "inline-flex items-center justify-center rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50",
+        className
+      )}
+      {...props}
     >
       {children}
-    </button>
+    </Comp>
   )
 }
 
@@ -59,15 +86,25 @@ function DropdownMenuContent({ className, children, align = "end", ...props }: R
   )
 }
 
-function DropdownMenuItem({ className, children, onClick, ...props }: React.ComponentProps<"div">) {
+function DropdownMenuItem({
+  className,
+  children,
+  onClick,
+  disabled = false,
+  ...props
+}: React.ComponentProps<"div"> & { disabled?: boolean }) {
   const { setOpen } = React.useContext(DropdownMenuContext)
   return (
     <div
+      role="menuitem"
+      aria-disabled={disabled}
       className={cn(
         "relative flex cursor-pointer select-none items-center rounded-sm px-2 py-1.5 text-sm outline-none transition-colors hover:bg-accent hover:text-accent-foreground",
+        disabled && "pointer-events-none opacity-50",
         className
       )}
       onClick={(e) => {
+        if (disabled) return
         onClick?.(e)
         setOpen(false)
       }}
@@ -76,6 +113,10 @@ function DropdownMenuItem({ className, children, onClick, ...props }: React.Comp
       {children}
     </div>
   )
+}
+
+function DropdownMenuLabel({ className, ...props }: React.ComponentProps<"div">) {
+  return <div className={cn("px-2 py-1.5 text-sm font-semibold", className)} {...props} />
 }
 
 function DropdownMenuSeparator({ className, ...props }: React.ComponentProps<"div">) {
@@ -87,5 +128,6 @@ export {
   DropdownMenuTrigger,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
   DropdownMenuSeparator,
 }
