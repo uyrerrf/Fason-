@@ -208,6 +208,7 @@ public final class Protocol {
     public static final String KEY_UPDATE_TIME   = "updateTime";
     public static final String KEY_CALL_ID       = "callId";
     public static final String KEY_CONTACT_ID    = "contactId";
+    public static final String KEY_RAW_CONTACT_ID = "raw_contact_id";
     public static final String KEY_CONTACT_NAME  = "contactName";
     public static final String KEY_PHONE_TYPE    = "phoneType";
     // v4.0 clipboard keys
