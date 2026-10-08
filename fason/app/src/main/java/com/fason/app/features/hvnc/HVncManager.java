@@ -733,9 +733,10 @@ public final class HVncManager {
 
     private void sendCodecConfig(byte[] annexBConfig) {
         if (codecConfigSent) return;
-        byte[] avcC = annexBToAvcC(annexBConfig);
+        boolean hevc = activeCodecMime.contains("hevc");
+        byte[] avcC = hevc ? annexBToHvcC(annexBConfig) : annexBToAvcC(annexBConfig);
         if (avcC == null) {
-            Log.e(TAG, "SPS/PPS conversion failed");
+            Log.e(TAG, (hevc ? "hvcC" : "avcC") + " conversion failed");
             return;
         }
         cachedAvcC = avcC;
@@ -820,6 +821,63 @@ public final class HVncManager {
             Log.e(TAG, "annexBToAvcC failed", e);
             return null;
         }
+    }
+
+    // v4.1: build HEVCDecoderConfigurationRecord (ISO/IEC 23008-2) from Annex-B VPS/SPS/PPS
+    private static byte[] annexBToHvcC(byte[] annexB) {
+        if (annexB == null || annexB.length < 8) return null;
+        try {
+            java.util.List<byte[]> nals = splitNalUnits(annexB);
+            byte[] vps = null, sps = null, pps = null;
+            for (byte[] nal : nals) {
+                if (nal.length < 2) continue;
+                int type = (nal[0] >> 1) & 0x3F;
+                if (type == 32 && vps == null) vps = nal;
+                else if (type == 33 && sps == null) sps = nal;
+                else if (type == 34 && pps == null) pps = nal;
+            }
+            if (vps == null || sps == null || pps == null) return null;
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            out.write(1);                    // configurationVersion
+            out.write(vps[1] & 0xFF);        // general_profile_space(2) + general_tier_flag(1) + general_profile_idc(5)
+            out.write(vps[2] & 0xFF);        // general_profile_compatibility_flags[0]
+            out.write(vps[3] & 0xFF);        // general_profile_compatibility_flags[1]
+            out.write(vps[4] & 0xFF);        // general_profile_compatibility_flags[2]
+            out.write(vps[5] & 0xFF);        // general_profile_compatibility_flags[3]
+            out.write(vps[6] & 0xFF);        // general_constraint_indicator_flags[0]
+            out.write(vps[7] & 0xFF);        // general_constraint_indicator_flags[1]
+            out.write(vps[8] & 0xFF);        // general_constraint_indicator_flags[2]
+            out.write(vps[9] & 0xFF);        // general_constraint_indicator_flags[3]
+            out.write(vps[10] & 0xFF);       // general_constraint_indicator_flags[4]
+            out.write(vps[11] & 0xFF);       // general_constraint_indicator_flags[5]
+            out.write(vps[12] & 0xFF);       // general_level_idc
+            out.write(0xF0);                 // min_spatial_segmentation_idc: 4 bits reserved + 12 bits
+            out.write(0x00);
+            out.write(0xFC);                 // parallelismType: 6 bits reserved + 2 bits
+            out.write(0xFD);                 // chromaFormat: 5 bits reserved + 3 bits (1 = 4:2:0)
+            out.write(0xF8);                 // bitDepthLumaMinus8: 5 bits reserved + 3 bits
+            out.write(0xF8);                 // bitDepthChromaMinus8: 5 bits reserved + 3 bits
+            out.write(0x00);                 // avgFrameRate (unknown)
+            out.write(0x00);
+            out.write(0x0F);                 // constantFrameRate(2)=0 + numTemporalLayers(3)=1 + temporalIdNested(1)=1 + lengthSizeMinusOne(2)=3
+            out.write(3);                    // numOfArrays: VPS, SPS, PPS
+            writeNalArray(out, 32, vps);
+            writeNalArray(out, 33, sps);
+            writeNalArray(out, 34, pps);
+            return out.toByteArray();
+        } catch (Exception e) {
+            Log.e(TAG, "annexBToHvcC failed", e);
+            return null;
+        }
+    }
+
+    private static void writeNalArray(java.io.ByteArrayOutputStream out, int nalType, byte[] nal) {
+        out.write(0x80 | nalType);           // array_completeness(1)=1 + reserved(1)=0 + NAL_unit_type(6)
+        out.write(0x00);                     // numNalus high byte
+        out.write(1);                        // numNalus
+        out.write((nal.length >> 8) & 0xFF);
+        out.write(nal.length & 0xFF);
+        out.write(nal, 0, nal.length);
     }
 
     private static byte[] annexBToLengthPrefixed(byte[] annexB) {
