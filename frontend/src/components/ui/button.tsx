@@ -6,20 +6,23 @@ function Slot({
   children,
   ...props
 }: React.HTMLAttributes<HTMLElement> & { children: React.ReactNode }) {
-  const child = React.Children.only(children) as React.ReactElement<any>
-  const childProps = child.props as Record<string, unknown>
-  const merged: Record<string, unknown> = { ...props }
-  if (childProps.className || (props as any).className) {
-    merged.className = cn((props as any).className, childProps.className)
+  const child = React.Children.only(children) as React.ReactElement<{
+    className?: string
+    onClick?: (e: React.MouseEvent) => void
+  }>
+  const { className: childClass, onClick: childClick, ...restChild } = child.props
+  const { className: slotClass, onClick: slotClick, ...restSlot } = props as React.HTMLAttributes<HTMLElement> & {
+    onClick?: (e: React.MouseEvent) => void
   }
-  if (childProps.onClick) {
-    const parentClick = (props as any).onClick
-    merged.onClick = (e: React.MouseEvent) => {
-      childProps.onClick(e)
-      parentClick?.(e)
-    }
-  }
-  return React.cloneElement(child, merged)
+  return React.cloneElement(child, {
+    ...restSlot,
+    ...restChild,
+    className: cn(slotClass, childClass),
+    onClick: (e: React.MouseEvent) => {
+      childClick?.(e)
+      slotClick?.(e)
+    },
+  } as any)
 }
 
 type Variant = "default" | "outline" | "ghost" | "destructive" | "secondary" | "link"
