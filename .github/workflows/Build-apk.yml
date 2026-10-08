@@ -6,11 +6,12 @@ on:
       build_type:
         description: "Build type"
         required: true
-        default: "debug"
+        default: debug
         type: choice
         options:
           - debug
           - release
+
       commit_to_repo:
         description: "Commit generated APK to repository"
         required: false
@@ -26,96 +27,236 @@ env:
 
 jobs:
   build:
+    name: Build Fason APK
     runs-on: ubuntu-latest
 
     steps:
+
+      # --------------------------------------------------
+      # CHECKOUT
+      # --------------------------------------------------
+
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # --------------------------------------------------
+      # JAVA
+      # --------------------------------------------------
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "17"
           cache: gradle
+
+      # --------------------------------------------------
+      # ANDROID SDK
+      # --------------------------------------------------
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
-        continue-on-error: true
+
+      - name: Locate Android SDK tools
+        shell: bash
+        run: |
+          set -e
+
+          echo "ANDROID_HOME=${ANDROID_HOME:-}"
+          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-}"
+
+          SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+
+          echo "SDK_ROOT=$SDK_ROOT"
+
+          SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" \
+            -type f \
+            -name sdkmanager \
+            -print -quit 2>/dev/null || true)"
+
+          if [ -z "$SDKMANAGER" ]; then
+            echo "::error::sdkmanager was not found."
+            echo "Searching entire Android SDK:"
+            find "$SDK_ROOT" -name sdkmanager -type f 2>/dev/null || true
+            exit 1
+          fi
+
+          echo "SDKMANAGER=$SDKMANAGER"
+
+          SDKMANAGER_DIR="$(dirname "$SDKMANAGER")"
+
+          echo "$SDKMANAGER_DIR" >> "$GITHUB_PATH"
+          echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
+
+          echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
+          echo "SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+
+          "$SDKMANAGER" --version
 
       - name: Accept Android SDK licenses
+        shell: bash
         run: |
-          yes | sdkmanager --licenses > /dev/null || true
+          set -e
 
-      - name: Install Android SDK packages
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+
+          echo "Android SDK licenses processed."
+
+      - name: Install Android SDK 35
+        shell: bash
         run: |
-          sdkmanager \
+          set -e
+
+          "$SDKMANAGER" \
             "platform-tools" \
             "platforms;android-35" \
             "build-tools;35.0.0"
 
-      - name: Show Android SDK information
-        run: |
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
-          sdkmanager --list_installed || true
+          echo "Android SDK installation complete."
 
-      - name: Decode Keystore
+      - name: Verify Android SDK
+        shell: bash
+        run: |
+          set -e
+
+          echo "Installed Android platforms:"
+          "$SDKMANAGER" --list_installed | grep -E \
+            "platforms;android-35|build-tools;35.0.0|platform-tools" || true
+
+          test -d "$SDK_ROOT/platforms/android-35"
+          test -d "$SDK_ROOT/build-tools/35.0.0"
+
+          echo "Android SDK 35 verified successfully."
+
+      # --------------------------------------------------
+      # RELEASE KEYSTORE
+      # --------------------------------------------------
+
+      - name: Decode release keystore
         if: ${{ env.BUILD_TYPE == 'release' }}
+        shell: bash
         run: |
-          mkdir -p fason/app
-          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > fason/app/release.keystore
+          set -e
 
-      - name: Grant execute permission for gradlew
+          if [ -z "${{ secrets.KEYSTORE_BASE64 }}" ]; then
+            echo "::error::KEYSTORE_BASE64 secret is missing."
+            exit 1
+          fi
+
+          mkdir -p fason/app
+
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > fason/app/release.keystore
+
+          test -s fason/app/release.keystore
+
+          echo "Release keystore decoded successfully."
+
+      # --------------------------------------------------
+      # GRADLE
+      # --------------------------------------------------
+
+      - name: Grant Gradle execute permission
         run: chmod +x fason/gradlew
 
-      - name: Build APK
+      - name: Show Gradle version
+        working-directory: fason
+        run: ./gradlew --version
+
+      # --------------------------------------------------
+      # BUILD
+      # --------------------------------------------------
+
+      - name: Build Debug APK
+        if: ${{ env.BUILD_TYPE == 'debug' }}
         working-directory: fason
         run: |
-          if [ "${BUILD_TYPE}" = "release" ]; then
-            ./gradlew assembleRelease --no-daemon --stacktrace
-          else
-            ./gradlew assembleDebug --no-daemon --stacktrace
-          fi
+          ./gradlew assembleDebug \
+            --no-daemon \
+            --stacktrace \
+            --warning-mode all
+
+      - name: Build Release APK
+        if: ${{ env.BUILD_TYPE == 'release' }}
+        working-directory: fason
         env:
           KEYSTORE_FILE: release.keystore
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
-
-      - name: Verify APK
         run: |
-          if [ "${BUILD_TYPE}" = "release" ]; then
+          ./gradlew assembleRelease \
+            --no-daemon \
+            --stacktrace \
+            --warning-mode all
+
+      # --------------------------------------------------
+      # VERIFY APK
+      # --------------------------------------------------
+
+      - name: Locate generated APK
+        shell: bash
+        run: |
+          set -e
+
+          echo "Searching for generated APK..."
+
+          find fason/app/build/outputs/apk \
+            -type f \
+            -name "*.apk" \
+            -print
+
+          if [ "$BUILD_TYPE" = "release" ]; then
             APK_PATH="fason/app/build/outputs/apk/release/app-release.apk"
           else
             APK_PATH="fason/app/build/outputs/apk/debug/app-debug.apk"
           fi
 
           if [ ! -f "$APK_PATH" ]; then
-            echo "::error::APK build failed. Expected file: $APK_PATH"
+            echo "::error::Expected APK was not found:"
+            echo "$APK_PATH"
+
+            echo "Available APK files:"
+            find fason/app/build/outputs/apk \
+              -type f \
+              -name "*.apk" \
+              -print || true
+
             exit 1
           fi
 
-          echo "APK built successfully."
+          APK_SIZE="$(du -h "$APK_PATH" | cut -f1)"
 
-          APK_SIZE=$(du -h "$APK_PATH" | cut -f1)
-
-          echo "APK_SIZE=$APK_SIZE" >> "$GITHUB_ENV"
           echo "APK_PATH=$APK_PATH" >> "$GITHUB_ENV"
+          echo "APK_SIZE=$APK_SIZE" >> "$GITHUB_ENV"
 
-          echo "APK: $APK_PATH"
+          echo "APK successfully generated."
+          echo "Path: $APK_PATH"
           echo "Size: $APK_SIZE"
+
+      # --------------------------------------------------
+      # ARTIFACT
+      # --------------------------------------------------
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: Fason-${{ env.BUILD_TYPE }}-apk
           path: ${{ env.APK_PATH }}
+          if-no-files-found: error
           retention-days: 30
+
+      # --------------------------------------------------
+      # COMMIT APK
+      # --------------------------------------------------
 
       - name: Commit APK to repository
         if: ${{ env.COMMIT_TO_REPO == 'true' }}
+        shell: bash
         run: |
+          set -e
+
           TARGET_DIR="backend/app/factory/baseApp"
           TARGET_PATH="$TARGET_DIR/Fason.apk"
 
@@ -123,12 +264,18 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           mkdir -p "$TARGET_DIR"
+
           cp "$APK_PATH" "$TARGET_PATH"
 
           if git diff --quiet -- "$TARGET_PATH"; then
-            echo "No changes detected. Skipping commit."
-          else
-            git add "$TARGET_PATH"
-            git commit -m "chore: update Fason.apk (${BUILD_TYPE}) [skip ci]"
-            git push origin HEAD:${GITHUB_REF_NAME}
+            echo "Fason.apk has not changed."
+            echo "Nothing to commit."
+            exit 0
           fi
+
+          git add "$TARGET_PATH"
+
+          git commit \
+            -m "chore: update Fason.apk (${BUILD_TYPE}) [skip ci]"
+
+          git push origin "HEAD:${GITHUB_REF_NAME}"
