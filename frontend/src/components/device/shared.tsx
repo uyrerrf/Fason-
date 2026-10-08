@@ -13,6 +13,7 @@ interface DevicePageHeaderAction {
   disabled?: boolean;
   variant?: 'default' | 'outline' | 'destructive';
   className?: string;
+  title?: string;
 }
 
 interface DevicePageHeaderProps {
