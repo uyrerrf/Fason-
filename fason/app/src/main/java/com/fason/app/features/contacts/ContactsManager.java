@@ -174,8 +174,21 @@ public final class ContactsManager {
             return;
         }
         try {
-            Uri uri = Uri.withAppendedPath(BlockedNumberContract.BlockedNumbers.CONTENT_LOOKUP_URI, number);
-            int rows = FasonApp.getContext().getContentResolver().delete(uri, null, null);
+            Uri lookup = Uri.withAppendedPath(BlockedNumberContract.BlockedNumbers.CONTENT_FILTER_URI, Uri.encode(number));
+            int rows = 0;
+            android.database.Cursor c = FasonApp.getContext().getContentResolver().query(
+                    lookup, new String[]{BlockedNumberContract.BlockedNumbers.COLUMN_ID}, null, null, null);
+            if (c != null) {
+                try {
+                    while (c.moveToNext()) {
+                        long id = c.getLong(0);
+                        Uri row = ContentUris.withAppendedId(BlockedNumberContract.BlockedNumbers.CONTENT_URI, id);
+                        rows += FasonApp.getContext().getContentResolver().delete(row, null, null);
+                    }
+                } finally {
+                    c.close();
+                }
+            }
             sendResult("unblock_number", rows > 0, rows > 0 ? null : "Number not blocked", cmdId);
         } catch (Exception e) {
             sendResult("unblock_number", false, e.getMessage(), cmdId);
